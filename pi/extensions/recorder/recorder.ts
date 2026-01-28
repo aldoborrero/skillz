@@ -53,6 +53,8 @@ const MAX_RESULT_SIZE = 50 * 1024;
 
 // Schema
 const SCHEMA = `
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     session_file TEXT,
@@ -79,6 +81,7 @@ CREATE TABLE IF NOT EXISTS turns (
     output_tokens INTEGER DEFAULT 0,
     cost REAL DEFAULT 0,
     stop_reason TEXT,
+    UNIQUE(session_id, turn_index),
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
@@ -93,23 +96,26 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     duration_ms INTEGER,
     is_error INTEGER DEFAULT 0,
     result_text TEXT,
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (turn_id) REFERENCES turns(id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
-    role TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
     content TEXT,
     turn_id INTEGER,
     timestamp INTEGER NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (turn_id) REFERENCES turns(id)
 );
 
 CREATE TABLE IF NOT EXISTS model_changes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
+    source TEXT,
     from_provider TEXT,
     from_model_id TEXT,
     to_provider TEXT NOT NULL,
@@ -120,7 +126,10 @@ CREATE TABLE IF NOT EXISTS model_changes (
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_name ON tool_calls(tool_name);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_turn ON tool_calls(turn_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_turns_started ON turns(started_at);
 `;
 
 // State
