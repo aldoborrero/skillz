@@ -115,7 +115,6 @@ let state = {
   currentTurnId: null as number | null,
   currentTurnStartedAt: 0,
   toolCallStarts: new Map<string, number>(),
-  turnIdCounter: 0,
 };
 
 // Track if sql.js is available
@@ -208,10 +207,18 @@ function extractResultText(content: Array<{ type: string; text?: string }>): str
   return result;
 }
 
-// Helper: Get last insert rowid (sql.js doesn't have lastInsertRowid directly)
-function getLastInsertId(): number {
-  // Use a counter since sql.js doesn't expose lastInsertRowid easily
-  return ++state.turnIdCounter;
+// Helper: Get last insert rowid
+function getLastInsertId(): number | null {
+  if (!db) return null;
+  try {
+    const result = db.exec("SELECT last_insert_rowid()");
+    if (result.length > 0 && result[0].values.length > 0) {
+      return result[0].values[0][0] as number;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -223,7 +230,6 @@ export default function (pi: ExtensionAPI) {
       state.sessionId = ctx.sessionManager.getSessionId();
       state.currentTurnId = null;
       state.toolCallStarts.clear();
-      state.turnIdCounter = 0;
 
       const sessionFile = ctx.sessionManager.getSessionFile();
       const modelProvider = ctx.model?.provider ?? null;
@@ -281,13 +287,14 @@ export default function (pi: ExtensionAPI) {
 
     try {
       state.currentTurnStartedAt = event.timestamp;
-      state.currentTurnId = getLastInsertId();
 
       safeRun(
-        `INSERT INTO turns (id, session_id, turn_index, started_at)
-         VALUES (?, ?, ?, ?)`,
-        [state.currentTurnId, state.sessionId, event.turnIndex, event.timestamp]
+        `INSERT INTO turns (session_id, turn_index, started_at)
+         VALUES (?, ?, ?)`,
+        [state.sessionId, event.turnIndex, event.timestamp]
       );
+
+      state.currentTurnId = getLastInsertId();
     } catch (e) {
       console.error("[recorder] turn_start error:", e);
     }
