@@ -22,7 +22,9 @@ skillz/
 │       ├── pexpect-cli/      # Interactive CLI automation
 │       ├── kagi-search/      # Kagi search integration
 │       ├── github-search/    # GitHub code search
-│       └── jina/             # Web content fetching
+│       ├── jina/             # Web content fetching
+│       ├── direnv/           # Load direnv environment
+│       └── recorder/         # SQLite session recorder
 └── packages/                 # Nix packages
     ├── pexpect-cli/          # pexpect-cli CLI tool
     └── pi-sync/              # Sync tool for pi extensions/skills
@@ -88,9 +90,45 @@ Tool: `github_search_code` - Search code across GitHub repositories using the `g
 
 ### jina
 
-Tool: `fetch_url` - Fetch webpages and convert to markdown using Jina AI.
+Tool: `jina` - Fetch webpages and convert to markdown using Jina AI.
 
 **Location:** [`pi/extensions/jina/`](pi/extensions/jina/)
+
+### direnv
+
+Loads direnv environment variables on session start and after each bash command. Mimics shell hook behavior.
+
+**Events:** `session_start`, `tool_result` (bash only)
+
+**Location:** [`pi/extensions/direnv/`](pi/extensions/direnv/)
+
+### recorder
+
+Records all session activity to SQLite for performance metrics and analytics.
+
+**Database:** `~/.pi/agent/recorder.db`
+
+**Tracked data:**
+- Sessions: start/end time, cwd, model, total tokens/cost
+- Turns: duration, tokens, cost, stop reason
+- Tool calls: name, input, result (up to 50KB), duration, errors
+- Model changes: timestamps, from/to model
+
+**Events:** `session_start`, `session_shutdown`, `turn_start`, `turn_end`, `tool_call`, `tool_result`, `model_select`
+
+**Setup:**
+```bash
+cd pi/extensions/recorder
+npm install  # Installs sql.js dependency
+```
+
+**Querying:**
+```bash
+sqlite3 ~/.pi/agent/recorder.db "SELECT * FROM sessions ORDER BY started_at DESC LIMIT 5"
+sqlite3 ~/.pi/agent/recorder.db "SELECT tool_name, COUNT(*), AVG(duration_ms) FROM tool_calls GROUP BY tool_name"
+```
+
+**Location:** [`pi/extensions/recorder/`](pi/extensions/recorder/)
 
 ## Packages
 
@@ -174,6 +212,13 @@ Skills can be used by ensuring they're accessible in your Claude Code configurat
 
 ### jina (extension)
 - Network access to Jina AI API
+
+### direnv (extension)
+- `direnv` installed and in PATH
+- `.envrc` must be allowed (`direnv allow`)
+
+### recorder (extension)
+- `sql.js` npm package (installed via `npm install` in extension directory)
 
 ## Development
 
