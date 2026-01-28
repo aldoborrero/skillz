@@ -21,12 +21,19 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
-// ModelSelectEvent is not exported from pi-coding-agent, define inline
+// Events not exported from pi-coding-agent, define inline
 interface ModelSelectEvent {
   type: "model_select";
   model: { provider: string; id: string };
   previousModel?: { provider: string; id: string };
   source: "set" | "cycle" | "restore";
+}
+
+interface InputEvent {
+  type: "input";
+  text: string;
+  images?: Array<{ type: "image"; data: string; mimeType: string }>;
+  source: "interactive" | "rpc" | "extension";
 }
 
 // sql.js types (loaded dynamically)
@@ -89,6 +96,16 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT,
+    turn_id INTEGER,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
 CREATE TABLE IF NOT EXISTS model_changes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -103,6 +120,7 @@ CREATE TABLE IF NOT EXISTS model_changes (
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_name ON tool_calls(tool_name);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 `;
 
 // State
@@ -187,8 +205,8 @@ function safeRun(sql: string, params: unknown[] = []): void {
   }
 }
 
-// Helper: Extract text content from tool result
-function extractResultText(content: Array<{ type: string; text?: string }>): string {
+// Helper: Extract text content from content array (messages, tool results)
+function extractTextContent(content: Array<{ type: string; text?: string }>): string {
   const texts: string[] = [];
 
   for (const item of content) {
@@ -199,7 +217,6 @@ function extractResultText(content: Array<{ type: string; text?: string }>): str
 
   let result = texts.join("\n");
 
-  // Truncate if too large
   if (result.length > MAX_RESULT_SIZE) {
     result = result.substring(0, MAX_RESULT_SIZE) + "\n... [truncated at 50KB]";
   }
@@ -259,6 +276,28 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // Input: record user message
+  pi.on("input", async (event: InputEvent) => {
+    if (!db || !state.sessionId) return;
+
+    try {
+      let content = event.text;
+      if (content.length > MAX_RESULT_SIZE) {
+        content = content.substring(0, MAX_RESULT_SIZE) + "\n... [truncated at 50KB]";
+      }
+
+      safeRun(
+        `INSERT INTO messages (session_id, role, content, timestamp)
+         VALUES (?, ?, ?, ?)`,
+        [state.sessionId, "user", content, Date.now()]
+      );
+
+      persistDatabase();
+    } catch (e) {
+      console.error("[recorder] input error:", e);
+    }
+  });
+
   // Session shutdown: finalize totals and persist
   pi.on("session_shutdown", async () => {
     if (!db || !state.sessionId) return;
@@ -310,8 +349,10 @@ export default function (pi: ExtensionAPI) {
 
       // Extract usage from assistant message
       const msg = event.message as {
+        role?: string;
         provider?: string;
         model?: string;
+        content?: Array<{ type: string; text?: string }>;
         usage?: { input?: number; output?: number; cost?: { total?: number } };
         stopReason?: string;
       };
@@ -345,6 +386,18 @@ export default function (pi: ExtensionAPI) {
          WHERE id = ?`,
         [inputTokens, outputTokens, cost, state.sessionId]
       );
+
+      // Record assistant message
+      if (msg.content) {
+        const assistantText = extractTextContent(msg.content);
+        if (assistantText) {
+          safeRun(
+            `INSERT INTO messages (session_id, role, content, turn_id, timestamp)
+             VALUES (?, ?, ?, ?, ?)`,
+            [state.sessionId, "assistant", assistantText, state.currentTurnId, endedAt]
+          );
+        }
+      }
 
       persistDatabase();
     } catch (e) {
@@ -388,7 +441,7 @@ export default function (pi: ExtensionAPI) {
 
       state.toolCallStarts.delete(event.toolCallId);
 
-      const resultText = extractResultText(event.content as Array<{ type: string; text?: string }>);
+      const resultText = extractTextContent(event.content as Array<{ type: string; text?: string }>);
 
       safeRun(
         `UPDATE tool_calls SET
