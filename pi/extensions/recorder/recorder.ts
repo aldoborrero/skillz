@@ -19,7 +19,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import type { Database as SqlJsDatabase, SqlJsStatic, SqlValue } from "sql.js";
 
 // Events not exported from pi-coding-agent, define inline
@@ -137,6 +137,27 @@ let state = {
 let sqlJsAvailable = true;
 let sqlJsError: string | null = null;
 
+// Debounced persistence
+let dirty = false;
+let persistTimer: ReturnType<typeof setInterval> | null = null;
+const PERSIST_INTERVAL_MS = 5000;
+
+function markDirty(): void {
+  dirty = true;
+}
+
+function startPersistTimer(): void {
+  if (persistTimer) return;
+  persistTimer = setInterval(persistDatabase, PERSIST_INTERVAL_MS);
+}
+
+function stopPersistTimer(): void {
+  if (persistTimer) {
+    clearInterval(persistTimer);
+    persistTimer = null;
+  }
+}
+
 // Helper: Load sql.js dynamically
 async function loadSqlJs(): Promise<SqlJsStatic> {
   if (SQL) return SQL;
@@ -177,16 +198,21 @@ async function initDatabase(): Promise<void> {
 
   // Ensure schema exists
   db.exec(SCHEMA);
-  persistDatabase();
+  markDirty();
+  persistDatabase(); // initial persist to ensure schema is saved
+  startPersistTimer();
 }
 
-// Helper: Persist database to disk
+// Helper: Persist database to disk (atomic write via tmp + rename)
 function persistDatabase(): void {
-  if (!db || !dbPath) return;
+  if (!db || !dbPath || !dirty) return;
 
   try {
     const data = db.export();
-    writeFileSync(dbPath, Buffer.from(data));
+    const tmpPath = dbPath + ".tmp";
+    writeFileSync(tmpPath, Buffer.from(data));
+    renameSync(tmpPath, dbPath);
+    dirty = false;
   } catch (e) {
     console.error("[recorder] Failed to persist database:", e);
   }
@@ -256,7 +282,7 @@ export default function (pi: ExtensionAPI) {
         [state.sessionId, sessionFile, ctx.cwd, Date.now(), modelProvider, modelId]
       );
 
-      persistDatabase();
+      markDirty();
 
       if (ctx.hasUI) {
         ctx.ui.setStatus("recorder", ctx.ui.theme.fg("success", "recorder ✓"));
@@ -290,7 +316,7 @@ export default function (pi: ExtensionAPI) {
         [state.sessionId, "user", content, Date.now()]
       );
 
-      persistDatabase();
+      markDirty();
     } catch (e) {
       console.error("[recorder] input error:", e);
     }
@@ -301,15 +327,19 @@ export default function (pi: ExtensionAPI) {
     if (!db || !state.sessionId) return;
 
     try {
-      // Update session with end time (totals are already accumulated)
       safeRun(
         `UPDATE sessions SET ended_at = ? WHERE id = ?`,
         [Date.now(), state.sessionId]
       );
+      markDirty();
 
+      // Stop timer and do final flush
+      stopPersistTimer();
       persistDatabase();
 
-      // Cleanup
+      // Clean up orphaned tool call start times
+      state.toolCallStarts.clear();
+
       db.close();
       db = null;
       state.sessionId = null;
@@ -397,7 +427,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      persistDatabase();
+      markDirty();
     } catch (e) {
       console.error("[recorder] turn_end error:", e);
     }
@@ -448,7 +478,7 @@ export default function (pi: ExtensionAPI) {
         [endedAt, durationMs, event.isError ? 1 : 0, resultText, event.toolCallId]
       );
 
-      persistDatabase();
+      markDirty();
     } catch (e) {
       console.error("[recorder] tool_result error:", e);
     }
@@ -472,7 +502,7 @@ export default function (pi: ExtensionAPI) {
         ]
       );
 
-      persistDatabase();
+      markDirty();
     } catch (e) {
       console.error("[recorder] model_select error:", e);
     }
